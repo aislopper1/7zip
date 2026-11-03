@@ -1,0 +1,85 @@
+name: Build 7-Zip x64 with Smart Extract (MSVC)
+
+# =====================================================================
+# This workflow is added to YOUR FORK's main branch (a fork-only commit).
+# It is NOT part of the pull request - the PR branch (smart-extract) stays
+# 100% clean.
+#
+# What it does (official build path from 7-Zip's DOC/readme.txt):
+#   1. Checks out the selected branch/commit (default: 'smart-extract').
+#   2. Sets up the Visual Studio x64 command-line environment (vcvars64).
+#   3. Runs `nmake` in CPP\7zip - builds ALL 7-Zip x64 binaries the official
+#      way, including:
+#        7-zip.dll  (the right-click menu shell extension)
+#        7zG.exe (GUI), 7zFM.exe (File Manager), 7z.exe, 7z.dll, 7zr.exe
+#   4. Runs the 8-case Smart Extract functional test suite against the
+#      freshly built 7z.exe.
+#   5. Uploads the binaries as a downloadable artifact.
+#
+# No Visual Studio or other software is installed on any user machine -
+# everything runs on GitHub's own build machine.
+# =====================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to build"
+        required: false
+        default: "smart-extract"
+
+permissions:
+  contents: read
+
+jobs:
+  build-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout the Smart Extract branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build all 7-Zip x64 binaries (official nmake path)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+          if "%VSPATH%"=="" (
+            echo ERROR: Visual Studio with the C++ toolset not found on the runner.
+            exit /b 1
+          )
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+          echo === Toolchain used ===
+          where cl
+          where nmake
+          where ml64
+          echo === Official build: nmake in CPP\7zip (per DOC\readme.txt) ===
+          cd CPP\7zip
+          nmake
+
+      - name: Collect the built binaries
+        shell: pwsh
+        run: |
+          $names = @('7z.exe','7z.dll','7-zip.dll','7zG.exe','7zFM.exe','7zr.exe')
+          $files = Get-ChildItem -Path "$env:GITHUB_WORKSPACE" -Recurse -Include $names -File
+          if (-not $files) { throw 'No built binaries found - did the nmake step fail?' }
+          New-Item -ItemType Directory -Path artifacts | Out-Null
+          foreach ($f in $files) { Copy-Item $f.FullName -Destination artifacts -Force }
+          Write-Output '=== Collected binaries ==='
+          Get-ChildItem artifacts | ForEach-Object { '{0,12:N0} bytes  {1}' -f $_.Length, $_.Name }
+
+      - name: Run the Smart Extract functional test suite
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin main
+          git show FETCH_HEAD:.github/test-smart-extract.ps1 > test.ps1
+          $sevenz = "$env:GITHUB_WORKSPACE\artifacts\7z.exe"
+          if (-not (Test-Path $sevenz)) { throw '7z.exe was not built - cannot run tests' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\test.ps1 -SevenZr $sevenz
+
+      - name: Upload the built binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: 7zip-smart-extract-x64-msvc
+          path: artifacts
+          if-no-files-found: error
